@@ -6,23 +6,41 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const lobby = {
-  users: [],
-  history: []
-};
+const games = {};
 
-function broadcast(data) {
+function makeCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 5; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
+function broadcastToGame(code, data) {
   const msg = JSON.stringify(data);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (
+      client.readyState === WebSocket.OPEN &&
+      client.gameCode === code
+    ) {
       client.send(msg);
     }
   });
 }
 
-wss.on('connection', (ws) => {
-  let userId = null;
+function broadcastUsers(code) {
+  const game = games[code];
+  if (game) {
+    broadcastToGame(code, {
+      type: 'users',
+      users: game.players,
+      host: game.host,
+    });
+  }
+}
 
+wss.on('connection', (ws) => {
   ws.on('message', (message) => {
     let data;
     try {
@@ -31,29 +49,75 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    if (data.type === 'join') {
-      userId = data.name;
-      lobby.users.push(userId);
-      lobby.history.push({ event: 'join', user: userId });
-      broadcast({ type: 'users', users: lobby.users });
+    if (data.type === 'create') {
+      const code = data.code || makeCode();
+      const game = (games[code] = games[code] || {
+        players: [],
+        host: data.name,
+        history: [],
+      });
+      ws.gameCode = code;
+      ws.userName = data.name;
+      if (!game.players.includes(data.name)) {
+        game.players.push(data.name);
+        game.history.push({ event: 'join', user: data.name });
+      }
+      ws.send(JSON.stringify({ type: 'created', code }));
+      broadcastUsers(code);
+    } else if (data.type === 'join') {
+      const game = games[data.code];
+      if (!game) {
+        ws.send(
+          JSON.stringify({ type: 'error', message: 'Game not found' })
+        );
+        return;
+      }
+      ws.gameCode = data.code;
+      ws.userName = data.name;
+      if (!game.players.includes(data.name)) {
+        game.players.push(data.name);
+        game.history.push({ event: 'join', user: data.name });
+      }
+      broadcastUsers(data.code);
     } else if (data.type === 'chat') {
-      const record = { event: 'chat', user: userId, message: data.message };
-      lobby.history.push(record);
-      broadcast({ type: 'chat', user: userId, message: data.message });
+      const code = ws.gameCode;
+      const game = games[code];
+      if (!game) return;
+      const record = { event: 'chat', user: ws.userName, message: data.message };
+      game.history.push(record);
+      broadcastToGame(code, {
+        type: 'chat',
+        user: ws.userName,
+        message: data.message,
+      });
+    } else if (data.type === 'start') {
+      const code = ws.gameCode;
+      const game = games[code];
+      if (game && ws.userName === game.host) {
+        game.history.push({ event: 'start' });
+        broadcastToGame(code, { type: 'started' });
+      }
     }
   });
 
   ws.on('close', () => {
-    if (userId) {
-      lobby.users = lobby.users.filter((u) => u !== userId);
-      lobby.history.push({ event: 'leave', user: userId });
-      broadcast({ type: 'users', users: lobby.users });
+    const code = ws.gameCode;
+    const name = ws.userName;
+    if (code && games[code]) {
+      const game = games[code];
+      game.players = game.players.filter((u) => u !== name);
+      game.history.push({ event: 'leave', user: name });
+      broadcastUsers(code);
+      if (game.players.length === 0) {
+        delete games[code];
+      }
     }
   });
 });
 
-app.get('/history', (req, res) => {
-  res.json(lobby.history);
+app.get('/history/:code', (req, res) => {
+  const code = req.params.code;
+  res.json(games[code]?.history || []);
 });
 
 const PORT = process.env.PORT || 3001;

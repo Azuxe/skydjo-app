@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 
 export type ChatMessage = {
   user: string;
@@ -8,15 +8,24 @@ export type ChatMessage = {
 export function useLobby(name: string) {
   const [users, setUsers] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [code, setCode] = useState<string | null>(null);
+  const [isHost, setIsHost] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
 
-  useEffect(() => {
+  const connect = (lobbyCode: string, create: boolean) => {
     const socket = new WebSocket('ws://localhost:3001');
     socketRef.current = socket;
+    setCode(lobbyCode);
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'join', name }));
-      fetch('http://localhost:3001/history')
+      socket.send(
+        JSON.stringify({
+          type: create ? 'create' : 'join',
+          name,
+          code: lobbyCode,
+        })
+      );
+      fetch(`http://localhost:3001/history/${lobbyCode}`)
         .then((res) => res.json())
         .then((history) => {
           const chats = history.filter((e: any) => e.event === 'chat');
@@ -34,18 +43,17 @@ export function useLobby(name: string) {
         const data = JSON.parse(ev.data);
         if (data.type === 'users') {
           setUsers(data.users);
+          setIsHost(data.host === name);
         } else if (data.type === 'chat') {
           setMessages((m) => [...m, { user: data.user, text: data.message }]);
+        } else if (data.type === 'created') {
+          setCode(data.code);
         }
       } catch {
         // ignore bad payloads
       }
     };
-
-    return () => {
-      socket.close();
-    };
-  }, [name]);
+  };
 
   const sendChat = (text: string) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -55,5 +63,18 @@ export function useLobby(name: string) {
     }
   };
 
-  return { users, messages, sendChat };
+  const startGame = () => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'start' }));
+    }
+  };
+
+  const disconnect = () => {
+    socketRef.current?.close();
+    setUsers([]);
+    setMessages([]);
+    setCode(null);
+  };
+
+  return { connect, users, messages, sendChat, startGame, code, isHost, disconnect };
 }
